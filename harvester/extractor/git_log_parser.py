@@ -34,7 +34,18 @@ from harvester.extractor.extractor_types import (
 # unconditionally regardless of ``--use-mailmap`` / ``--no-use-mailmap``
 # flags, and the ``.mailmap`` ships inside the cloned (attacker-
 # controlled) repo — see ``tag_walker`` for the threat-model rationale.
-COMMIT_LOG_FORMAT = "%H %P\t%an\t%ae\t%at"
+# ── HARVESTER DIVERGENCE FROM EXODOS-BACKEND PHASE 1B SOURCE ──
+# Switched the timestamp field from ``%at`` (unix epoch) to ``%aI``
+# (ISO 8601 with offset, e.g. ``2012-07-16T22:23:10-07:00``) so the
+# harvester can preserve the committer's local TZ offset alongside
+# the UTC instant. Phase 1b doesn't need TZ because BOM-time inference
+# relies on LLM guesses from name+email. The harvester uses TZ for the
+# persons.csv rollup (tz_dominant, hour_histogram, night_commit_ratio),
+# a stronger geo signal than name guessing for stable-TZ countries
+# like Russia/China/Japan that don't observe DST. If/when this lands
+# back in Phase 1b, the parser below and the CommitRecord type both
+# need matching updates.
+COMMIT_LOG_FORMAT = "%H %P\t%an\t%ae\t%aI"
 
 # Four-field tab-delimited tag descriptor.
 #
@@ -45,9 +56,7 @@ COMMIT_LOG_FORMAT = "%H %P\t%an\t%ae\t%at"
 # parser prefers the dereferenced value when present so the SHA
 # emitted in ``TagInfo`` is always a commit SHA — what every
 # downstream consumer expects.
-TAG_REF_FORMAT = (
-    "%(refname:short)\t%(objectname)\t%(*objectname)\t%(creatordate:iso8601-strict)"
-)
+TAG_REF_FORMAT = "%(refname:short)\t%(objectname)\t%(*objectname)\t%(creatordate:iso8601-strict)"
 
 
 def parse_tag_lines(text: str) -> list[TagInfo]:
@@ -110,17 +119,23 @@ def _parse_commit_line(line: str) -> CommitRecord | None:
     if len(parts) != 4:
         logger.warning("Malformed git log line, skipping", line=line[:120])
         return None
-    sha_and_parents, name, email, timestamp_text = parts
+    sha_and_parents, name, email, iso_ts = parts
     tokens = sha_and_parents.split(" ")
     sha = tokens[0]
     parents = tuple(token for token in tokens[1:] if token)
     try:
-        author_ts = datetime.fromtimestamp(int(timestamp_text), tz=UTC)
-    except (ValueError, OverflowError):
+        # ``%aI`` is strict ISO 8601 with a numeric offset. The parsed
+        # datetime is tz-aware; we keep ``author_ts`` in UTC for backward
+        # compatibility with the source extractor and stash the local
+        # offset as a separate ``"+0300"``-style string for the rollup.
+        local_dt = datetime.fromisoformat(iso_ts)
+        author_ts = local_dt.astimezone(UTC)
+        tz_offset = local_dt.strftime("%z") or "+0000"
+    except (ValueError, TypeError):
         logger.warning(
             "Unparseable author timestamp, skipping commit",
             sha=sha,
-            raw=timestamp_text,
+            raw=iso_ts,
         )
         return None
     return CommitRecord(
@@ -129,4 +144,5 @@ def _parse_commit_line(line: str) -> CommitRecord | None:
         author_name=name,
         author_email=email,
         author_ts=author_ts,
+        tz_offset=tz_offset,
     )

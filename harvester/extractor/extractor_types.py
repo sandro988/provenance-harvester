@@ -26,9 +26,7 @@ from enum import Enum
 # Mirrored from the legacy ``GitHubContributorsService`` constant. When
 # a second consumer appears we should extract this to a shared util;
 # until then a single copy keeps the strangler-fig boundary clean.
-ALLOWED_GIT_HOSTS: frozenset[str] = frozenset(
-    {"github.com", "gitlab.com", "bitbucket.org"}
-)
+ALLOWED_GIT_HOSTS: frozenset[str] = frozenset({"github.com", "gitlab.com", "bitbucket.org"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +105,12 @@ class CommitRecord:
     timestamp — author dates survive rebase and reflect when the
     work was actually written, which is what "contributor activity"
     means in practice.
+
+    ``tz_offset`` is the literal ``%az`` field from git, e.g.
+    ``"-0700"`` for PDT or ``"+0300"`` for MSK. Preserved as a
+    string rather than parsed to minutes so debug logs read like
+    git's native output. **Harvester-only field** — see DIVERGENCE
+    note in ``git_log_parser.py``.
     """
 
     sha: str
@@ -114,6 +118,7 @@ class CommitRecord:
     author_name: str
     author_email: str
     author_ts: datetime
+    tz_offset: str
 
 
 @dataclass(frozen=True, slots=True)
