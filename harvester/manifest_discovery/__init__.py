@@ -44,6 +44,11 @@ from harvester.manifest_discovery.rubygems import (
     RubyGemsManifestDetector,
 )
 
+# Registry of all known ecosystem detectors. The matcher runs every
+# detector against a repo; each yields zero or more discovered packages.
+# Filtering by ``ecosystem`` against the target package list happens
+# downstream — discovery itself is ecosystem-agnostic. Order has no
+# semantic meaning.
 DETECTORS: tuple[ManifestDetector, ...] = (
     NpmManifestDetector(),
     PypiManifestDetector(),
@@ -53,12 +58,6 @@ DETECTORS: tuple[ManifestDetector, ...] = (
     GoManifestDetector(),
     RubyGemsManifestDetector(),
 )
-"""Registry of all known ecosystem detectors.
-
-The matcher runs every detector against a repo; each yields zero or
-more discovered packages. Filtering by ``ecosystem`` against the
-target package list happens downstream — discovery itself is
-ecosystem-agnostic. Order has no semantic meaning."""
 
 __all__ = [
     "DETECTORS",

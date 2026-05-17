@@ -1,6 +1,6 @@
 """Materialize manifest files of a bare clone into a tmp working tree.
 
-The harvester clones with ``--bare --filter=tree:0 --no-checkout``.
+The harvester clones with ``--bare --filter=blob:none --no-checkout``.
 That gives us a small, network-efficient clone we can run ``git log``
 against — but it has no working tree on disk, so the manifest
 detectors (which walk a ``Path`` looking for ``package.json``,
@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import itertools
+import posixpath
 import shutil
 import tempfile
 from pathlib import Path
@@ -62,7 +64,7 @@ _PATHS_PER_ARCHIVE_CALL = 1000
 
 def is_manifest_path(relative_path: str) -> bool:
     """Return ``True`` if ``relative_path`` is a manifest our detectors parse."""
-    name = relative_path.rsplit("/", 1)[-1]
+    name = posixpath.basename(relative_path)
     if name in _EXACT_MANIFEST_NAMES:
         return True
     return any(name.endswith(ext) for ext in _MANIFEST_EXTENSIONS)
@@ -81,7 +83,7 @@ async def checkout_manifest_files(bare_repo: Path) -> AsyncIterator[Path]:
     workdir = Path(tempfile.mkdtemp(prefix="harvester-manifests-"))
     try:
         manifests = await _list_manifest_paths(bare_repo)
-        for chunk in _chunked(manifests, _PATHS_PER_ARCHIVE_CALL):
+        for chunk in itertools.batched(manifests, _PATHS_PER_ARCHIVE_CALL):
             await _archive_into(bare_repo, chunk, workdir)
         yield workdir
     finally:
@@ -109,7 +111,7 @@ async def _list_manifest_paths(bare_repo: Path) -> list[str]:
     return [p for p in stdout.decode("utf-8").splitlines() if p and is_manifest_path(p)]
 
 
-async def _archive_into(bare_repo: Path, paths: list[str], dest: Path) -> None:
+async def _archive_into(bare_repo: Path, paths: tuple[str, ...] | list[str], dest: Path) -> None:
     """Extract ``paths`` at HEAD into ``dest`` via ``git archive`` + ``tar -xf``.
 
     Goes through a tmp tarball on disk rather than piping the two
@@ -159,7 +161,3 @@ async def _archive_into(bare_repo: Path, paths: list[str], dest: Path) -> None:
     finally:
         tar_path.unlink(missing_ok=True)
 
-
-def _chunked(items: list[str], size: int) -> list[list[str]]:
-    """Split a list into fixed-size chunks (last chunk may be smaller)."""
-    return [items[i : i + size] for i in range(0, len(items), size)]

@@ -25,7 +25,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from harvester.extractor.contributor_aggregator import BOT_PATTERNS
+from harvester.extractor.contributor_aggregator import ContributorAggregator
 from harvester.extractor.extractor_types import CommitRecord, TagRangeWalk
 from harvester.writer.person_aggregator import aggregate_persons
 
@@ -275,7 +275,7 @@ def _contributors_for_range(commits: list[CommitRecord]) -> list[_ContribRow]:
                 author_name=name,
                 author_email=email,
                 commits=len(person_commits),
-                is_bot=_looks_like_bot(name, email),
+                is_bot=ContributorAggregator.detect_bot(name, email),
                 tz_dominant=tz_dominant,
                 first_commit_ts=ordered[0].author_ts,
                 last_commit_ts=ordered[-1].author_ts,
@@ -285,11 +285,6 @@ def _contributors_for_range(commits: list[CommitRecord]) -> list[_ContribRow]:
         )
     return rows
 
-
-def _looks_like_bot(name: str, email: str) -> bool:
-    """Same bot heuristic as the vendored ``ContributorAggregator``."""
-    haystack = f"{name} {email}".lower()
-    return any(pattern in haystack for pattern in BOT_PATTERNS)
 
 
 _PRERELEASE_MARKERS: tuple[str, ...] = (

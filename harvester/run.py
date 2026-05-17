@@ -4,7 +4,7 @@ Reads a pre-resolved CSV (with ``repo_url`` column attached), takes only
 the repos assigned to this shard via a deterministic hash, then for each
 unique repo:
 
-1. Clones it once (``git clone --bare --filter=tree:0``) into a tmp dir.
+1. Clones it once (``git clone --bare --filter=blob:none``) into a tmp dir.
 2. Walks every git tag via the existing TagWalker.
 3. Writes the four CSVs (components, versions, contributors, persons)
    into a per-repo subdirectory of ``--output-dir``.
@@ -46,7 +46,7 @@ from pathlib import Path
 
 import structlog
 
-from harvester.extractor.extractor_types import ExtractorDeps
+from harvester.extractor.extractor_types import ExtractorDeps, TagRangeWalk
 from harvester.extractor.git_runner import GitRunner
 from harvester.extractor.repo_cloner import RepoCloner
 from harvester.extractor.tag_walker import TagWalker
@@ -174,18 +174,13 @@ async def harvest_one_repo(
         return {"repo_url": work_item.repo_url, "status": "skipped_shutdown"}
 
     async with semaphore:
-        if shutdown_event.is_set():
-            return {"repo_url": work_item.repo_url, "status": "skipped_shutdown"}
-
         synced_at = datetime.now(UTC).isoformat(timespec="seconds")
         match_result: MatchResult | None = None
 
         try:
             async with cloner.clone_to_temp(work_item.repo_url) as clone_path:
                 async with checkout_manifest_files(clone_path) as manifest_tree:
-                    match_result = match_packages_in_repo(
-                        manifest_tree, work_item.components
-                    )
+                    match_result = match_packages_in_repo(manifest_tree, work_item.components)
                 packages = await _walk_matched_or_fallback(
                     walker, clone_path, match_result, work_item
                 )
@@ -220,10 +215,10 @@ async def harvest_one_repo(
                 "elapsed_s": time.perf_counter() - started,
             }
 
-    fellback = not match_result.matched
+    used_repo_wide_fallback = not match_result.matched
     return {
         "repo_url": work_item.repo_url,
-        "status": "ok_fallback_repo_wide" if fellback else "ok",
+        "status": "ok_fallback_repo_wide" if used_repo_wide_fallback else "ok",
         "matched": len(match_result.matched),
         "unmatched": len(match_result.unmatched),
         "packages_written": len(packages),
@@ -271,7 +266,7 @@ async def _walk_matched_or_fallback(
 
 def _package_harvest_from_match(
     match: PackageMatch,
-    walks: list,
+    walks: list[TagRangeWalk],
 ) -> PackageHarvest:
     """Build a PackageHarvest from a matched (component, path) pair."""
     return PackageHarvest(
@@ -284,7 +279,7 @@ def _package_harvest_from_match(
 def _canonical_name(namespace: str, name: str) -> str:
     """Glue namespace and name the same way the legacy writer did.
 
-    Kept compatible with the pre-2c-B output so the downstream loader
+    Kept compatible with the legacy writer output so the downstream loader
     sees a stable shape. Maven coordinates appear as
     ``groupId/artifactId`` here rather than the registry-native
     ``groupId:artifactId`` for that reason; reconciling is the bulk
