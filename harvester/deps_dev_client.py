@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 import time
+from urllib.parse import quote
 
 import httpx
 import structlog
@@ -56,7 +57,7 @@ class DepsDevClient:
     def close(self) -> None:
         self._client.close()
 
-    def __enter__(self) -> "DepsDevClient":
+    def __enter__(self) -> DepsDevClient:
         return self
 
     def __exit__(self, *_exc_info: object) -> None:
@@ -74,7 +75,12 @@ class DepsDevClient:
             return None
 
         qualified = _qualified_name_for_depsdev(ecosystem, namespace, name)
-        package = self._get(f"/systems/{system}/packages/{qualified}")
+        # Path segments must be percent-encoded — deps.dev otherwise parses
+        # ``@jest/console`` as the package being ``@jest`` and ``console``
+        # as a sub-resource. Equivalent issue affects go modules whose
+        # qualified names contain multiple slashes (``github.com/foo/bar``).
+        encoded_name = quote(qualified, safe="")
+        package = self._get(f"/systems/{system}/packages/{encoded_name}")
         if not isinstance(package, dict):
             return None
 
@@ -82,8 +88,9 @@ class DepsDevClient:
         if latest_version is None:
             return None
 
+        encoded_version = quote(latest_version, safe="")
         version_doc = self._get(
-            f"/systems/{system}/packages/{qualified}/versions/{latest_version}"
+            f"/systems/{system}/packages/{encoded_name}/versions/{encoded_version}"
         )
         if not isinstance(version_doc, dict):
             return None
@@ -147,10 +154,7 @@ def _pick_latest_version(versions: list[dict]) -> str | None:
     default/stable — better than returning ``None`` and missing the
     repo URL entirely.
     """
-    default_versions = [
-        v for v in versions
-        if v.get("isDefault") and not v.get("isPrerelease")
-    ]
+    default_versions = [v for v in versions if v.get("isDefault") and not v.get("isPrerelease")]
     if default_versions:
         return default_versions[-1]["versionKey"]["version"]
     stable = [v for v in versions if not v.get("isPrerelease")]
