@@ -34,10 +34,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import csv
 import hashlib
 import signal
-import sys
 import time
 from collections import defaultdict
 from dataclasses import dataclass, replace
@@ -102,9 +102,7 @@ def shard_for_repo(repo_url: str, total_shards: int) -> int:
     return int.from_bytes(digest[:8], "big") % total_shards
 
 
-def load_work(
-    input_csv: Path, shard: int, total_shards: int
-) -> list[RepoWorkItem]:
+def load_work(input_csv: Path, shard: int, total_shards: int) -> list[RepoWorkItem]:
     """Read pre-resolved CSV, filter to this shard, group by repo URL."""
     by_repo: dict[str, list[ComponentVersion]] = defaultdict(list)
     skipped_no_url = 0
@@ -138,7 +136,7 @@ def load_work(
         shard=shard,
         total_shards=total_shards,
         repos_in_shard=len(work),
-        component_versions_in_shard=sum(len(c) for c in work),
+        component_versions_in_shard=sum(len(c.components) for c in work),
         skipped_no_repo_url=skipped_no_url,
         skipped_other_shard=skipped_other_shard,
     )
@@ -182,7 +180,7 @@ async def harvest_one_repo(
         try:
             async with cloner.clone_to_temp(work_item.repo_url) as clone_path:
                 walks = await walker.walk(clone_path)
-        except Exception as exc:  # noqa: BLE001 — we want every failure surfaced
+        except Exception as exc:
             return {
                 "repo_url": work_item.repo_url,
                 "status": "clone_or_walk_failed",
@@ -201,15 +199,13 @@ async def harvest_one_repo(
             CsvWriter(out_dir=repo_out).write_all(
                 ecosystem=exemplar.ecosystem,
                 name=(
-                    f"{exemplar.namespace}/{exemplar.name}"
-                    if exemplar.namespace
-                    else exemplar.name
+                    f"{exemplar.namespace}/{exemplar.name}" if exemplar.namespace else exemplar.name
                 ),
                 repo_url=work_item.repo_url,
                 synced_at=synced_at,
                 walks=walks,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return {
                 "repo_url": work_item.repo_url,
                 "status": "write_failed",
@@ -234,13 +230,11 @@ def install_signal_handlers(shutdown_event: asyncio.Event) -> None:
         logger.warning("run.shutdown_signal_received", signal=signal_name)
         shutdown_event.set()
 
+    # Windows asyncio doesn't support signal handlers — fine for the
+    # local-dev path; the AWS runtime is Linux.
     for sig in (signal.SIGTERM, signal.SIGINT):
-        try:
+        with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(sig, _shutdown, sig.name)
-        except NotImplementedError:
-            # Windows asyncio doesn't support signal handlers — fine for
-            # the local-dev path; the AWS runtime is Linux.
-            pass
 
 
 async def main() -> int:
@@ -306,9 +300,7 @@ async def main() -> int:
     started = time.perf_counter()
     results = await asyncio.gather(
         *(
-            harvest_one_repo(
-                work_item, args.output_dir, cloner, walker, semaphore, shutdown_event
-            )
+            harvest_one_repo(work_item, args.output_dir, cloner, walker, semaphore, shutdown_event)
             for work_item in work
         )
     )
