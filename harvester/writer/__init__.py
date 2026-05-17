@@ -14,11 +14,12 @@ hour histogram, night-commit ratio, etc.) that are expensive to derive
 from contributor rows at query time.
 """
 
-from harvester.writer.csv_writer import CsvWriter, WriterOutput
+from harvester.writer.csv_writer import CsvWriter, PackageHarvest, WriterOutput
 from harvester.writer.person_aggregator import PersonRollup, aggregate_persons
 
 __all__ = [
     "CsvWriter",
+    "PackageHarvest",
     "PersonRollup",
     "WriterOutput",
     "aggregate_persons",

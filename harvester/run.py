@@ -50,7 +50,12 @@ from harvester.extractor.extractor_types import ExtractorDeps
 from harvester.extractor.git_runner import GitRunner
 from harvester.extractor.repo_cloner import RepoCloner
 from harvester.extractor.tag_walker import TagWalker
-from harvester.writer import CsvWriter
+from harvester.repo_package_matcher import (
+    MatchResult,
+    PackageMatch,
+    match_packages_in_repo,
+)
+from harvester.writer import CsvWriter, PackageHarvest
 
 logger = structlog.get_logger("harvester.run")
 
@@ -171,15 +176,15 @@ async def harvest_one_repo(
         if shutdown_event.is_set():
             return {"repo_url": work_item.repo_url, "status": "skipped_shutdown"}
 
-        # The exemplar component identifies the row in components.csv; we
-        # write one row even if the repo serves many packages, because
-        # provenance is a repo-level fact. Pick the first deterministically.
-        exemplar = work_item.components[0]
         synced_at = datetime.now(UTC).isoformat(timespec="seconds")
+        match_result: MatchResult | None = None
 
         try:
             async with cloner.clone_to_temp(work_item.repo_url) as clone_path:
-                walks = await walker.walk(clone_path)
+                match_result = match_packages_in_repo(clone_path, work_item.components)
+                packages = await _walk_matched_or_fallback(
+                    walker, clone_path, match_result, work_item
+                )
         except Exception as exc:
             return {
                 "repo_url": work_item.repo_url,
@@ -188,22 +193,20 @@ async def harvest_one_repo(
                 "elapsed_s": time.perf_counter() - started,
             }
 
-        if not walks:
+        if not packages:
             return {
                 "repo_url": work_item.repo_url,
                 "status": "empty_walks",
+                "matched": len(match_result.matched) if match_result else 0,
+                "unmatched": len(match_result.unmatched) if match_result else 0,
                 "elapsed_s": time.perf_counter() - started,
             }
 
         try:
             CsvWriter(out_dir=repo_out).write_all(
-                ecosystem=exemplar.ecosystem,
-                name=(
-                    f"{exemplar.namespace}/{exemplar.name}" if exemplar.namespace else exemplar.name
-                ),
                 repo_url=work_item.repo_url,
                 synced_at=synced_at,
-                walks=walks,
+                packages=packages,
             )
         except Exception as exc:
             return {
@@ -213,13 +216,77 @@ async def harvest_one_repo(
                 "elapsed_s": time.perf_counter() - started,
             }
 
+    fellback = not match_result.matched
     return {
         "repo_url": work_item.repo_url,
-        "status": "ok",
-        "tag_count": len(walks),
+        "status": "ok_fallback_repo_wide" if fellback else "ok",
+        "matched": len(match_result.matched),
+        "unmatched": len(match_result.unmatched),
+        "packages_written": len(packages),
         "components_served": len(work_item.components),
         "elapsed_s": time.perf_counter() - started,
     }
+
+
+async def _walk_matched_or_fallback(
+    walker: TagWalker,
+    clone_path: Path,
+    match_result: MatchResult,
+    work_item: RepoWorkItem,
+) -> list[PackageHarvest]:
+    """Run per-package walks if anything matched; otherwise repo-wide.
+
+    Zero matches in a repo we clearly resolved to is almost always a
+    rename or sub-published artefact. Falling back to a repo-wide walk
+    keeps the data flowing — we lose per-package granularity for that
+    repo, but every contributor still lands in the warehouse under the
+    exemplar target's coordinates so downstream queries don't see a
+    silent hole.
+    """
+    if not match_result.matched:
+        walks = await walker.walk(clone_path)
+        if not walks:
+            return []
+        exemplar = work_item.components[0]
+        return [
+            PackageHarvest(
+                ecosystem=exemplar.ecosystem,
+                name=_canonical_name(exemplar.namespace, exemplar.name),
+                walks=walks,
+            )
+        ]
+
+    packages: list[PackageHarvest] = []
+    for match in match_result.matched:
+        walks = await walker.walk(clone_path, path_filter=match.relative_path)
+        if not walks:
+            continue
+        packages.append(_package_harvest_from_match(match, walks))
+    return packages
+
+
+def _package_harvest_from_match(
+    match: PackageMatch,
+    walks: list,
+) -> PackageHarvest:
+    """Build a PackageHarvest from a matched (component, path) pair."""
+    return PackageHarvest(
+        ecosystem=match.component.ecosystem,
+        name=_canonical_name(match.component.namespace, match.component.name),
+        walks=walks,
+    )
+
+
+def _canonical_name(namespace: str, name: str) -> str:
+    """Glue namespace and name the same way the legacy writer did.
+
+    Kept compatible with the pre-2c-B output so the downstream loader
+    sees a stable shape. Maven coordinates appear as
+    ``groupId/artifactId`` here rather than the registry-native
+    ``groupId:artifactId`` for that reason; reconciling is the bulk
+    loader's call to make.
+    """
+    return f"{namespace}/{name}" if namespace else name
 
 
 def install_signal_handlers(shutdown_event: asyncio.Event) -> None:

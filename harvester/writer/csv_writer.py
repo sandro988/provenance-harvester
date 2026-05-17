@@ -1,7 +1,16 @@
-"""Write the four harvester CSVs from an extractor run.
+"""Write the four harvester CSVs from one or more package extractions.
 
 The CSV shape mirrors ADR 0001's Postgres schema — these files load
 directly via ``COPY ... FROM`` into the production warehouse tables.
+
+A single ``write_all`` call covers every package harvested from one
+repository, so the per-repo output directory stays atomic for
+resumability checks. Within each file, rows are keyed by
+``(ecosystem, name)`` so monorepos serving many packages share a
+single ``components.csv`` / ``versions.csv`` / ``contributors.csv`` /
+``persons.csv`` rather than fanning out into per-package
+subdirectories. The downstream loader was already keyed this way; row
+counts simply grow with the number of packages discovered.
 
 The writer consumes raw ``TagRangeWalk`` objects (not the orchestrator's
 aggregated ``TagRangeContributors``) because contributor-level fields
@@ -18,7 +27,22 @@ from pathlib import Path
 
 from harvester.extractor.contributor_aggregator import BOT_PATTERNS
 from harvester.extractor.extractor_types import CommitRecord, TagRangeWalk
-from harvester.writer.person_aggregator import PersonRollup, aggregate_persons
+from harvester.writer.person_aggregator import aggregate_persons
+
+
+@dataclass(frozen=True, slots=True)
+class PackageHarvest:
+    """One package's per-tag walks, ready for emission.
+
+    ``ecosystem`` and ``name`` are the canonical coordinates this package
+    publishes under (npm ``name``, maven ``groupId:artifactId``, ...).
+    ``walks`` is the extractor's output for the package's directory —
+    every tag range the path participated in.
+    """
+
+    ecosystem: str
+    name: str
+    walks: list[TagRangeWalk]
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +53,7 @@ class WriterOutput:
     versions_path: Path
     contributors_path: Path
     persons_path: Path
+    components_rows: int
     versions_rows: int
     contributors_rows: int
     persons_rows: int
@@ -36,36 +61,35 @@ class WriterOutput:
 
 @dataclass(frozen=True, slots=True)
 class CsvWriter:
-    """Stateless writer — call ``write_all`` per component."""
+    """Stateless writer — call ``write_all`` once per repo."""
 
     out_dir: Path
 
     def write_all(
         self,
         *,
-        ecosystem: str,
-        name: str,
         repo_url: str,
         synced_at: str,
-        walks: list[TagRangeWalk],
+        packages: list[PackageHarvest],
     ) -> WriterOutput:
-        """Write all four CSVs for one component."""
+        """Write all four CSVs covering every package harvested from one repo."""
         self.out_dir.mkdir(parents=True, exist_ok=True)
         components_path = self.out_dir / "components.csv"
         versions_path = self.out_dir / "versions.csv"
         contributors_path = self.out_dir / "contributors.csv"
         persons_path = self.out_dir / "persons.csv"
 
-        self._write_components(components_path, ecosystem, name, repo_url, synced_at)
-        versions_rows = self._write_versions(versions_path, ecosystem, name, walks)
-        contributors_rows = self._write_contributors(contributors_path, ecosystem, name, walks)
-        persons_rows = self._write_persons(persons_path, ecosystem, name, aggregate_persons(walks))
+        components_rows = self._write_components(components_path, repo_url, synced_at, packages)
+        versions_rows = self._write_versions(versions_path, packages)
+        contributors_rows = self._write_contributors(contributors_path, packages)
+        persons_rows = self._write_persons(persons_path, packages)
 
         return WriterOutput(
             components_path=components_path,
             versions_path=versions_path,
             contributors_path=contributors_path,
             persons_path=persons_path,
+            components_rows=components_rows,
             versions_rows=versions_rows,
             contributors_rows=contributors_rows,
             persons_rows=persons_rows,
@@ -73,15 +97,20 @@ class CsvWriter:
 
     @staticmethod
     def _write_components(
-        path: Path, ecosystem: str, name: str, repo_url: str, synced_at: str
-    ) -> None:
+        path: Path,
+        repo_url: str,
+        synced_at: str,
+        packages: list[PackageHarvest],
+    ) -> int:
         with path.open("w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(["ecosystem", "name", "repo_url", "last_synced_at"])
-            writer.writerow([ecosystem, name, repo_url, synced_at])
+            for pkg in packages:
+                writer.writerow([pkg.ecosystem, pkg.name, repo_url, synced_at])
+        return len(packages)
 
     @staticmethod
-    def _write_versions(path: Path, ecosystem: str, name: str, walks: list[TagRangeWalk]) -> int:
+    def _write_versions(path: Path, packages: list[PackageHarvest]) -> int:
         rows = 0
         with path.open("w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
@@ -96,25 +125,24 @@ class CsvWriter:
                     "is_prerelease",
                 ]
             )
-            for walk in walks:
-                writer.writerow(
-                    [
-                        ecosystem,
-                        name,
-                        walk.this.name,
-                        walk.this.creator_date.isoformat(),
-                        walk.this.sha,
-                        walk.prev.name if walk.prev is not None else "",
-                        "true" if _is_prerelease(walk.this.name) else "false",
-                    ]
-                )
-                rows += 1
+            for pkg in packages:
+                for walk in pkg.walks:
+                    writer.writerow(
+                        [
+                            pkg.ecosystem,
+                            pkg.name,
+                            walk.this.name,
+                            walk.this.creator_date.isoformat(),
+                            walk.this.sha,
+                            walk.prev.name if walk.prev is not None else "",
+                            "true" if _is_prerelease(walk.this.name) else "false",
+                        ]
+                    )
+                    rows += 1
         return rows
 
     @staticmethod
-    def _write_contributors(
-        path: Path, ecosystem: str, name: str, walks: list[TagRangeWalk]
-    ) -> int:
+    def _write_contributors(path: Path, packages: list[PackageHarvest]) -> int:
         rows = 0
         with path.open("w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
@@ -134,29 +162,31 @@ class CsvWriter:
                     "commit_sha_last",
                 ]
             )
-            for walk in walks:
-                for row in _contributors_for_range(walk.commits):
-                    writer.writerow(
-                        [
-                            ecosystem,
-                            name,
-                            walk.this.name,
-                            row.author_name,
-                            row.author_email,
-                            row.commits,
-                            "true" if row.is_bot else "false",
-                            row.tz_dominant,
-                            row.first_commit_ts.isoformat(),
-                            row.last_commit_ts.isoformat(),
-                            row.commit_sha_first,
-                            row.commit_sha_last,
-                        ]
-                    )
-                    rows += 1
+            for pkg in packages:
+                for walk in pkg.walks:
+                    for row in _contributors_for_range(walk.commits):
+                        writer.writerow(
+                            [
+                                pkg.ecosystem,
+                                pkg.name,
+                                walk.this.name,
+                                row.author_name,
+                                row.author_email,
+                                row.commits,
+                                "true" if row.is_bot else "false",
+                                row.tz_dominant,
+                                row.first_commit_ts.isoformat(),
+                                row.last_commit_ts.isoformat(),
+                                row.commit_sha_first,
+                                row.commit_sha_last,
+                            ]
+                        )
+                        rows += 1
         return rows
 
     @staticmethod
-    def _write_persons(path: Path, ecosystem: str, name: str, persons: list[PersonRollup]) -> int:
+    def _write_persons(path: Path, packages: list[PackageHarvest]) -> int:
+        rows = 0
         with path.open("w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(
@@ -183,35 +213,34 @@ class CsvWriter:
                     "hour_histogram",
                 ]
             )
-            for p in persons:
-                writer.writerow(
-                    [
-                        ecosystem,
-                        name,
-                        p.author_email,
-                        p.author_name,
-                        p.commits_lifetime,
-                        p.versions_contributed,
-                        p.first_ever_commit.isoformat(),
-                        p.last_ever_commit.isoformat(),
-                        p.active_span_days,
-                        p.tz_dominant,
-                        p.tz_dominant_ratio,
-                        p.tz_offsets_distinct,
-                        ",".join(p.tz_offsets_seen),
-                        "true" if p.tz_is_likely_unknown else "false",
-                        p.tz_signal_reason,
-                        p.tz_explanation,
-                        p.night_commit_ratio,
-                        p.weekday_weekend_ratio,
-                        p.email_domain,
-                        ",".join(str(n) for n in p.hour_histogram),
-                    ]
-                )
-        return len(persons)
-
-
-# ── internal helpers ──────────────────────────────────────────────────
+            for pkg in packages:
+                for p in aggregate_persons(pkg.walks):
+                    writer.writerow(
+                        [
+                            pkg.ecosystem,
+                            pkg.name,
+                            p.author_email,
+                            p.author_name,
+                            p.commits_lifetime,
+                            p.versions_contributed,
+                            p.first_ever_commit.isoformat(),
+                            p.last_ever_commit.isoformat(),
+                            p.active_span_days,
+                            p.tz_dominant,
+                            p.tz_dominant_ratio,
+                            p.tz_offsets_distinct,
+                            ",".join(p.tz_offsets_seen),
+                            "true" if p.tz_is_likely_unknown else "false",
+                            p.tz_signal_reason,
+                            p.tz_explanation,
+                            p.night_commit_ratio,
+                            p.weekday_weekend_ratio,
+                            p.email_domain,
+                            ",".join(str(n) for n in p.hour_histogram),
+                        ]
+                    )
+                    rows += 1
+        return rows
 
 
 @dataclass(frozen=True, slots=True)

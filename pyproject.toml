@@ -53,6 +53,11 @@ testpaths = ["tests"]
     "RUF003",  # Ambiguous unicode in comments (same)
     "UP042",   # StrEnum vs (str, Enum) — preserve source style
 ]
+"harvester/manifest_discovery/*" = [
+    "RUF002",  # Ambiguous unicode in docstrings — preserved from source
+    "RUF003",  # Ambiguous unicode in comments — preserved from source
+    "RUF100",  # noqa directives target main-project rules (S314) — kept verbatim
+]
 
 [build-system]
 requires = ["hatchling"]
