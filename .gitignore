@@ -36,6 +36,7 @@ Thumbs.db
 # Project-specific
 /output/*
 !/output/footprint.csv
+!/output/footprint_resolved.csv
 /state/
 /tmp/
 benchmark_output/
