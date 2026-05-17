@@ -22,7 +22,7 @@ Rate limit: the public endpoint allows 5000 anonymous requests per hour
 from __future__ import annotations
 
 import time
-from typing import Iterator
+from collections.abc import Iterator
 
 import httpx
 import structlog
@@ -84,7 +84,7 @@ class EcosystemsClient:
     def close(self) -> None:
         self._client.close()
 
-    def __enter__(self) -> "EcosystemsClient":
+    def __enter__(self) -> EcosystemsClient:
         return self
 
     def __exit__(self, *_exc_info: object) -> None:
@@ -108,14 +108,16 @@ class EcosystemsClient:
 
     def top_packages(
         self, ecosystem: str, limit: int
-    ) -> Iterator[tuple[str, str | None, int | None]]:
+    ) -> Iterator[tuple[str, str | None, int | None, str | None]]:
         """Yield up to ``limit`` packages sorted by downloads descending.
 
-        Each tuple is ``(qualified_name, latest_release_number, downloads)``.
-        The qualified name comes through whatever shape the registry
-        publishes (e.g. ``@types/node`` for npm scoped,
+        Each tuple is ``(qualified_name, latest_release_number, downloads,
+        repository_url)``. The qualified name comes through whatever shape
+        the registry publishes (e.g. ``@types/node`` for npm scoped,
         ``org.hdrhistogram:HdrHistogram`` for maven); callers that need
-        namespace/name split should do so themselves.
+        namespace/name split should do so themselves. ``repository_url``
+        is what the registry has on file — often the GitHub clone URL,
+        but ``None`` for packages where ecosyste.ms hasn't surfaced one.
         """
         registry = _registry_for(ecosystem)
         if registry is None:
@@ -141,15 +143,14 @@ class EcosystemsClient:
                     package["name"],
                     package.get("latest_release_number"),
                     package.get("downloads"),
+                    package.get("repository_url"),
                 )
                 yielded += 1
             if len(body) < MAX_PER_PAGE:
                 return  # last page
             page += 1
 
-    def _get(
-        self, path: str, params: dict | None = None
-    ) -> dict | list | None:
+    def _get(self, path: str, params: dict | None = None) -> dict | list | None:
         """GET ``path`` with retry-on-transient logic.
 
         Returns the parsed JSON body on success, ``None`` on 404 or after

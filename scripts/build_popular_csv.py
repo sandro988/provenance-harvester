@@ -55,20 +55,24 @@ ECOSYSTEM_CAPS: list[tuple[str, int]] = [
     ("pear", 1_000),
 ]
 
-Coord = tuple[str, str, str, str]  # (ecosystem, namespace, name, version)
+Coord = tuple[str, str, str, str, str]  # (ecosystem, namespace, name, version, repo_url)
 
 
-def load_footprint_coords(path: Path) -> set[Coord]:
-    """Read the footprint so popular rows can exclude what we already have."""
+def load_footprint_identity_keys(path: Path) -> set[tuple[str, str, str, str]]:
+    """Return ``(ecosystem, namespace, name, version)`` keys already in footprint.
+
+    Excluded from popular.csv so the two files are disjoint. We key on
+    the identity quadruple regardless of repo URL — if the same package-
+    version is in footprint, we don't need it in popular even if URLs
+    differ.
+    """
     if not path.exists():
         return set()
-    coords: set[Coord] = set()
+    keys: set[tuple[str, str, str, str]] = set()
     with path.open(newline="") as fh:
         for row in csv.DictReader(fh):
-            coords.add(
-                (row["ecosystem"], row["namespace"], row["name"], row["version"])
-            )
-    return coords
+            keys.add((row["ecosystem"], row["namespace"], row["name"], row["version"]))
+    return keys
 
 
 def split_qualified_name(ecosystem: str, qualified: str) -> tuple[str, str]:
@@ -107,18 +111,18 @@ def fetch_ecosystem_top(
     """Return top-N coords for an ecosystem and count of rows skipped (no version)."""
     coords: list[Coord] = []
     skipped_no_version = 0
-    for qualified, latest_version, _downloads in client.top_packages(ecosystem, cap):
+    for qualified, latest_version, _downloads, repo_url in client.top_packages(ecosystem, cap):
         if not latest_version:
             skipped_no_version += 1
             continue
         namespace, name = split_qualified_name(ecosystem, qualified)
-        coords.append((ecosystem, namespace, name, latest_version))
+        coords.append((ecosystem, namespace, name, latest_version, repo_url or ""))
     return coords, skipped_no_version
 
 
 def main() -> int:
-    footprint_coords = load_footprint_coords(FOOTPRINT_CSV)
-    print(f"[popular] footprint has {len(footprint_coords)} coords to exclude")
+    footprint_keys = load_footprint_identity_keys(FOOTPRINT_CSV)
+    print(f"[popular] footprint has {len(footprint_keys)} (eco,ns,name,version) keys to exclude")
     print()
 
     all_coords: set[Coord] = set()
@@ -131,30 +135,31 @@ def main() -> int:
             elapsed = time.perf_counter() - started
 
             before_count = len(all_coords)
-            all_coords.update(c for c in coords if c not in footprint_coords)
+            for coord in coords:
+                # Identity key is the 4-tuple; repo_url is metadata only.
+                if coord[:4] not in footprint_keys:
+                    all_coords.add(coord)
             added = len(all_coords) - before_count
-            duplicates = len(coords) - added - sum(
-                1 for c in coords if c in footprint_coords
-            )
 
-            per_ecosystem_stats.append(
-                (ecosystem, len(coords), skipped, added, elapsed)
-            )
+            per_ecosystem_stats.append((ecosystem, len(coords), skipped, added, elapsed))
             print(
                 f"  {ecosystem:<11} fetched={len(coords):>6}  skipped_no_ver={skipped:>4}  "
-                f"new_after_exclude={added:>6}  ({elapsed:>5.1f}s)"
+                f"new_after_exclude={added:>6}  ({elapsed:>5.1f}s)",
+                flush=True,
             )
 
     OUT_CSV.parent.mkdir(parents=True, exist_ok=True)
     with OUT_CSV.open("w", newline="") as fh:
         writer = csv.writer(fh)
-        writer.writerow(["ecosystem", "namespace", "name", "version"])
+        writer.writerow(["ecosystem", "namespace", "name", "version", "repo_url"])
         for row in sorted(all_coords):
             writer.writerow(row)
 
     print()
     print(f"[popular] total rows written: {len(all_coords)}")
-    eco_counts = Counter(eco for eco, _, _, _ in all_coords)
+    eco_counts = Counter(eco for eco, _, _, _, _ in all_coords)
+    with_url = sum(1 for _, _, _, _, url in all_coords if url)
+    print(f"[popular] rows with repo_url : {with_url} ({with_url / max(len(all_coords), 1):.0%})")
     print("[popular] per-ecosystem in output:")
     for eco, count in eco_counts.most_common():
         print(f"  {eco:<11} {count:>6}")
