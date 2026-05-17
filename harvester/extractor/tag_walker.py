@@ -48,13 +48,27 @@ class TagWalker:
         self._deps = deps
         self._runner = runner
 
-    async def walk(self, repo_dir: Path) -> list[TagRangeWalk]:
+    async def walk(
+        self,
+        repo_dir: Path,
+        *,
+        path_filter: str | None = None,
+    ) -> list[TagRangeWalk]:
         """Return one ``TagRangeWalk`` per tag, oldest first.
 
         An empty list is returned when the repo has no tags — that
         is a legitimate state, not an error (early-stage repos, or
         registry packages whose source lives unmaintained on a
         branch). The orchestrator decides whether to escalate.
+
+        ``path_filter`` narrows the contributor attribution to
+        commits that touched the given repo-relative path. Tag
+        enumeration and the main commit log remain repo-wide — the
+        BFS needs the full parent graph to compute reachability per
+        tag, so we cannot pre-filter the log itself. Instead, a
+        cheap second log fetches the SHA set of commits touching
+        the path and we intersect each range's commits with that
+        set. ``None`` skips the second log and the filter.
 
         Raises:
             asyncio.TimeoutError: When either git invocation
@@ -98,8 +112,47 @@ class TagWalker:
         commits = parse_commit_lines(commit_lines)
 
         ranges = bfs_per_tag_range(commits, tags)
+        if path_filter is not None:
+            path_shas = await self._fetch_path_touching_shas(repo_dir, path_filter)
+            ranges = {
+                tag_name: [commit for commit in tag_commits if commit.sha in path_shas]
+                for tag_name, tag_commits in ranges.items()
+            }
         pairs = pair_tags_chronologically(tags)
         return [
             TagRangeWalk(prev=prev, this=this, commits=ranges[this.name])
             for prev, this in pairs
         ]
+
+    async def _fetch_path_touching_shas(
+        self,
+        repo_dir: Path,
+        path_filter: str,
+    ) -> set[str]:
+        """Return the SHA set of commits that touched ``path_filter``.
+
+        Runs ``git log --all --no-merges --pretty=%H -- <path>`` —
+        a SHA-only output mode that skips author/parent/timestamp
+        decoding and is roughly an order of magnitude cheaper than
+        the main log we already paid for. ``--no-merges`` matches
+        the main log's filter so the SHA set lines up with the
+        commits the BFS placed into ranges.
+
+        The path is passed as a separate argv element after ``--``,
+        keeping it out of git's option parsing space — a path that
+        happens to start with ``-`` (rare but legal) cannot be
+        misread as a flag.
+        """
+        sha_lines = await self._runner.run(
+            (
+                "log",
+                "--all",
+                "--no-merges",
+                "--pretty=format:%H",
+                "--",
+                path_filter,
+            ),
+            timeout=self._deps.log_timeout_s,
+            repo_dir=repo_dir,
+        )
+        return {line.strip() for line in sha_lines.splitlines() if line.strip()}

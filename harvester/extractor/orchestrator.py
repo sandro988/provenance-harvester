@@ -96,7 +96,9 @@ class ExtractorOrchestrator:
         """
         try:
             async with self._cloner.clone_to_temp(params.repo_url) as clone_path:
-                walks = await self._walker.walk(clone_path)
+                walks = await self._walker.walk(
+                    clone_path, path_filter=params.path_filter
+                )
         except asyncio.CancelledError:
             # Structured cancellation must propagate untouched —
             # absorbing it here would make Celery / parent-task

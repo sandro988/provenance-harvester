@@ -66,6 +66,15 @@ class ExtractorParams:
     ``tags_limit=5`` exercises the latest five releases rather than
     five releases from 2013. Leave it ``None`` to process every tag.
 
+    ``path_filter`` restricts each tag's contributor set to commits
+    that touched ``path_filter`` (a repo-relative POSIX path, as
+    produced by ``manifest_discovery``). Leave it ``None`` to attribute
+    every commit in the range. Required for per-package attribution
+    inside monorepos: ``facebook/react`` clones once but the caller
+    asks for ``react-dom``'s contributors by passing
+    ``path_filter="packages/react-dom"``. Tag enumeration stays
+    repo-wide; only commit attribution narrows.
+
     ``clone_depth`` is deliberately absent: the extractor needs the
     full commit history to walk parent pointers per tag range, and
     a shallow clone (``--depth N``) would truncate ancestors the BFS
@@ -75,6 +84,7 @@ class ExtractorParams:
 
     repo_url: str
     tags_limit: int | None = None
+    path_filter: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
