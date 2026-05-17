@@ -1,0 +1,167 @@
+"""Build popular.csv — top-downloaded packages across language ecosystems.
+
+Complements `footprint.csv` (which is what customers actually use) with
+the most popular packages globally per ecosystem — so new customer BOMs
+have a high probability of hitting pre-computed provenance data even
+for packages no existing customer has uploaded yet.
+
+For each supported ecosystem, queries ecosyste.ms's
+``/registries/<reg>/packages?sort=downloads&order=desc`` endpoint up to
+a per-ecosystem cap, emits one row per package using the registry's
+latest_release_number as the version. Rows already in ``footprint.csv``
+are excluded so the two files are disjoint.
+
+The per-ecosystem caps are sized proportionally to registry activity:
+npm and Maven get the biggest slice (they have the largest meaningful
+download tails), small ecosystems get smaller caps. Beyond the cap is
+mostly zero-download abandoned packages that won't show up in real
+customer BOMs anyway.
+
+Output schema matches ``footprint.csv``: ``ecosystem, namespace, name,
+version`` (4 columns), so the same downstream harvester can consume
+either file interchangeably.
+"""
+
+from __future__ import annotations
+
+import csv
+import sys
+import time
+from collections import Counter
+from pathlib import Path
+
+from harvester.ecosystems_client import EcosystemsClient
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+FOOTPRINT_CSV = REPO_ROOT / "output" / "footprint.csv"
+OUT_CSV = REPO_ROOT / "output" / "popular.csv"
+
+# Per-ecosystem caps sized proportionally to the meaningful download tail.
+# Order is the order of fetch (so we fail fast if early ecosystems break).
+ECOSYSTEM_CAPS: list[tuple[str, int]] = [
+    ("npm", 50_000),
+    ("maven", 50_000),
+    ("pypi", 30_000),
+    ("golang", 30_000),
+    ("nuget", 30_000),
+    ("composer", 20_000),
+    ("cargo", 20_000),
+    ("gem", 15_000),
+    ("cocoapods", 10_000),
+    ("pub", 10_000),
+    ("hex", 5_000),
+    ("conan", 5_000),
+    ("luarocks", 2_000),
+    ("pear", 1_000),
+]
+
+Coord = tuple[str, str, str, str]  # (ecosystem, namespace, name, version)
+
+
+def load_footprint_coords(path: Path) -> set[Coord]:
+    """Read the footprint so popular rows can exclude what we already have."""
+    if not path.exists():
+        return set()
+    coords: set[Coord] = set()
+    with path.open(newline="") as fh:
+        for row in csv.DictReader(fh):
+            coords.add(
+                (row["ecosystem"], row["namespace"], row["name"], row["version"])
+            )
+    return coords
+
+
+def split_qualified_name(ecosystem: str, qualified: str) -> tuple[str, str]:
+    """Split ecosyste.ms's combined ``name`` field into ``(namespace, name)``.
+
+    Mirrors how packageurl-python parses PURLs so popular.csv stays
+    consistent with footprint.csv's namespace/name split:
+
+    - npm: ``@scope/pkg`` → ``("@scope", "pkg")``
+    - maven: ``groupId:artifactId`` → ``("groupId", "artifactId")``
+    - golang: ``host/org/repo`` → ``("host/org", "repo")``
+    - composer: ``vendor/package`` → ``("vendor", "package")``
+    - everything else without a separator: ``("", qualified)``
+    """
+    if ecosystem == "maven" and ":" in qualified:
+        namespace, _, name = qualified.partition(":")
+        return namespace, name
+    if "/" not in qualified:
+        return "", qualified
+    if qualified.startswith("@"):
+        # npm scoped: keep the @ in the namespace, split on first /
+        namespace, _, name = qualified.partition("/")
+        return namespace, name
+    if ecosystem == "golang":
+        # Go modules: namespace is everything up to the last slash
+        namespace, _, name = qualified.rpartition("/")
+        return namespace, name
+    # composer, github, cocoapods etc — namespace/name (single slash)
+    namespace, _, name = qualified.partition("/")
+    return namespace, name
+
+
+def fetch_ecosystem_top(
+    client: EcosystemsClient, ecosystem: str, cap: int
+) -> tuple[list[Coord], int]:
+    """Return top-N coords for an ecosystem and count of rows skipped (no version)."""
+    coords: list[Coord] = []
+    skipped_no_version = 0
+    for qualified, latest_version, _downloads in client.top_packages(ecosystem, cap):
+        if not latest_version:
+            skipped_no_version += 1
+            continue
+        namespace, name = split_qualified_name(ecosystem, qualified)
+        coords.append((ecosystem, namespace, name, latest_version))
+    return coords, skipped_no_version
+
+
+def main() -> int:
+    footprint_coords = load_footprint_coords(FOOTPRINT_CSV)
+    print(f"[popular] footprint has {len(footprint_coords)} coords to exclude")
+    print()
+
+    all_coords: set[Coord] = set()
+    per_ecosystem_stats: list[tuple[str, int, int, int, float]] = []
+
+    with EcosystemsClient() as client:
+        for ecosystem, cap in ECOSYSTEM_CAPS:
+            started = time.perf_counter()
+            coords, skipped = fetch_ecosystem_top(client, ecosystem, cap)
+            elapsed = time.perf_counter() - started
+
+            before_count = len(all_coords)
+            all_coords.update(c for c in coords if c not in footprint_coords)
+            added = len(all_coords) - before_count
+            duplicates = len(coords) - added - sum(
+                1 for c in coords if c in footprint_coords
+            )
+
+            per_ecosystem_stats.append(
+                (ecosystem, len(coords), skipped, added, elapsed)
+            )
+            print(
+                f"  {ecosystem:<11} fetched={len(coords):>6}  skipped_no_ver={skipped:>4}  "
+                f"new_after_exclude={added:>6}  ({elapsed:>5.1f}s)"
+            )
+
+    OUT_CSV.parent.mkdir(parents=True, exist_ok=True)
+    with OUT_CSV.open("w", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["ecosystem", "namespace", "name", "version"])
+        for row in sorted(all_coords):
+            writer.writerow(row)
+
+    print()
+    print(f"[popular] total rows written: {len(all_coords)}")
+    eco_counts = Counter(eco for eco, _, _, _ in all_coords)
+    print("[popular] per-ecosystem in output:")
+    for eco, count in eco_counts.most_common():
+        print(f"  {eco:<11} {count:>6}")
+    print()
+    print(f"[popular] wrote {OUT_CSV}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
