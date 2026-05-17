@@ -2,23 +2,21 @@
 
 Two operations the harvester needs across multiple flows:
 
-- :func:`EcosystemsClient.resolve_repo_url` — given an ``(ecosystem,
-  name)`` pair like ``(npm, lodash)``, return the source repository URL
-  (e.g. ``https://github.com/lodash/lodash``). Used by the harvester to
-  decide where to clone for a component.
+- :func:`EcosystemsClient.resolve_repo_url` — given an
+  ``(ecosystem, namespace, name)`` triple, return the source repository
+  URL (e.g. ``https://github.com/lodash/lodash``). Used by the harvester
+  to decide where to clone for a component.
 
 - :func:`EcosystemsClient.top_packages` — yield the top-N packages of an
-  ecosystem sorted by total downloads, with the latest stable version.
-  Used to build the popular-packages list that extends provenance
-  coverage beyond the customer footprint.
+  ecosystem sorted by total downloads. Backs the popular-packages list
+  that extends provenance coverage beyond the customer footprint.
 
 The client is intentionally synchronous: the harvester is a batch tool,
 not a request hot-path, and httpx's sync interface keeps error handling
 straightforward.
 
 Rate limit: the public endpoint allows 5000 anonymous requests per hour
-(per ``X-RateLimit-Limit``). The harvester is well under this for any
-realistic batch.
+(per ``X-RateLimit-Limit``).
 """
 
 from __future__ import annotations
@@ -59,6 +57,20 @@ ECOSYSTEM_TO_REGISTRY: dict[str, str] = {
 }
 
 
+def qualified_package_name(ecosystem: str, namespace: str, name: str) -> str:
+    """Combine a parsed PURL ``(namespace, name)`` into the form registries expect.
+
+    Maven uses ``groupId:artifactId``; everything else with a namespace
+    uses ``namespace/name`` (npm scoped packages, go modules, composer
+    vendor/package, etc.). Packages without a namespace are returned
+    as-is.
+    """
+    if not namespace:
+        return name
+    separator = ":" if ecosystem == "maven" else "/"
+    return f"{namespace}{separator}{name}"
+
+
 class EcosystemsClient:
     """Synchronous client for the ecosyste.ms packages API."""
 
@@ -78,7 +90,7 @@ class EcosystemsClient:
     def __exit__(self, *_exc_info: object) -> None:
         self.close()
 
-    def resolve_repo_url(self, ecosystem: str, name: str) -> str | None:
+    def resolve_repo_url(self, ecosystem: str, namespace: str, name: str) -> str | None:
         """Return the package's source repository URL, or ``None``.
 
         Returns ``None`` when the ecosystem is not on ecosyste.ms, the
@@ -88,7 +100,8 @@ class EcosystemsClient:
         registry = _registry_for(ecosystem)
         if registry is None:
             return None
-        body = self._get(f"/registries/{registry}/packages/{name}")
+        qualified = qualified_package_name(ecosystem, namespace, name)
+        body = self._get(f"/registries/{registry}/packages/{qualified}")
         if not isinstance(body, dict):
             return None
         return body.get("repository_url") or None
@@ -98,9 +111,11 @@ class EcosystemsClient:
     ) -> Iterator[tuple[str, str | None, int | None]]:
         """Yield up to ``limit`` packages sorted by downloads descending.
 
-        Each tuple is ``(name, latest_release_number, downloads)``.
-        Latest release and downloads may be ``None`` for packages where
-        the registry hasn't surfaced that metadata.
+        Each tuple is ``(qualified_name, latest_release_number, downloads)``.
+        The qualified name comes through whatever shape the registry
+        publishes (e.g. ``@types/node`` for npm scoped,
+        ``org.hdrhistogram:HdrHistogram`` for maven); callers that need
+        namespace/name split should do so themselves.
         """
         registry = _registry_for(ecosystem)
         if registry is None:
