@@ -7,7 +7,7 @@ It performs three jobs end to end, in order:
    refusing anything outside the configured hosts before any
    subprocess is spawned.
 2. Create a temporary directory, clone the repo into it with
-   ``--bare --filter=tree:0 --no-checkout`` (the most network- and
+   ``--bare --filter=blob:none --no-checkout`` (small clones that
    disk-efficient form for our read-only access pattern), retrying
    on transient errors with linear backoff.
 3. Yield the clone path to the caller and, on context exit, delete
@@ -238,11 +238,18 @@ class RepoCloner:
                 await asyncio.sleep(backoff)
 
     async def _run_clone(self, repo_url: str, target: Path) -> None:
-        # ``--bare`` + ``--filter=tree:0`` + ``--no-checkout`` is the
-        # minimum-cost form: no working tree, no blobs unless asked,
-        # no checkout pass. Roughly 2× smaller than
-        # ``--filter=blob:none`` and 30–50% faster on networking-bound
-        # clones.
+        # ``--bare`` + ``--filter=blob:none`` + ``--no-checkout``
+        # keeps all commit + tree objects local while deferring file
+        # contents until something actually reads them. Trees MUST be
+        # local because ``git log -- <path>`` (used by the per-package
+        # path filter) computes per-commit diffs to determine which
+        # commits touched the path — that diff needs both sides'
+        # trees. The smaller ``--filter=tree:0`` defers tree fetches
+        # too, but the on-demand promisor protocol does not reliably
+        # produce historical trees needed by a path-filter walk
+        # (commit-graph references can outrun what the remote will
+        # serve back on-demand). Trees are typically 10–30% of repo
+        # size, an acceptable cost for a reliable walk.
         #
         # The literal ``--`` before ``repo_url`` is defense-in-depth:
         # the validator already rejects leading-dash segments, but a
@@ -252,7 +259,7 @@ class RepoCloner:
             (
                 "clone",
                 "--bare",
-                "--filter=tree:0",
+                "--filter=blob:none",
                 "--no-checkout",
                 "--",
                 repo_url,

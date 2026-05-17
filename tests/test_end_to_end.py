@@ -242,3 +242,53 @@ def test_zero_match_repo_falls_back_to_repo_wide(
     rows = _read_csv(repo_out / "components.csv")
     assert len(rows) == 1
     assert rows[0]["name"] == "claimed-name"
+
+
+
+@pytest.fixture
+def bare_clone_of_multi_package_repo(
+    multi_package_repo: Path, tmp_path: Path
+) -> Path:
+    """Bare-clone the multi-package fixture to match production cloner shape.
+
+    The harvester clones every repo with ``git clone --bare
+    --filter=tree:0 --no-checkout``. That shape has no working tree, so
+    the matcher must materialise manifest files before it can detect
+    them. Running the e2e test against a bare clone closes the loop
+    that the synthetic working-tree fixture missed.
+    """
+    bare = tmp_path / "bare-clone.git"
+    subprocess.run(
+        ["git", "clone", "--bare", str(multi_package_repo), str(bare)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return bare
+
+
+def test_per_package_separation_holds_through_bare_clone(
+    bare_clone_of_multi_package_repo: Path, tmp_path: Path
+) -> None:
+    """The full pipeline must work against the bare-clone shape used in prod."""
+    repo_url = "https://github.com/example/multi"
+    components = (
+        ComponentVersion("npm", "", "foo-pkg", "1.0.0", repo_url),
+        ComponentVersion("npm", "", "bar-pkg", "2.0.0", repo_url),
+    )
+    work_item = RepoWorkItem(repo_url=repo_url, components=components)
+    out_root = tmp_path / "out"
+
+    result = _run_harvest(bare_clone_of_multi_package_repo, work_item, out_root)
+
+    assert result["status"] == "ok"
+    assert result["matched"] == 2
+    assert result["packages_written"] == 2
+
+    contributors = _read_csv(out_root / work_item.slug / "contributors.csv")
+    foo_authors = {r["author_name"] for r in contributors if r["name"] == "foo-pkg"}
+    bar_authors = {r["author_name"] for r in contributors if r["name"] == "bar-pkg"}
+    assert "FooAuthor" in foo_authors
+    assert "BarAuthor" not in foo_authors
+    assert "BarAuthor" in bar_authors
+    assert "FooAuthor" not in bar_authors

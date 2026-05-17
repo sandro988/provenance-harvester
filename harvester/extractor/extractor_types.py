@@ -79,7 +79,7 @@ class ExtractorParams:
     full commit history to walk parent pointers per tag range, and
     a shallow clone (``--depth N``) would truncate ancestors the BFS
     requires. Bulk harvest always uses full bare clones via
-    ``--filter=tree:0``.
+    ``--filter=blob:none``.
     """
 
     repo_url: str

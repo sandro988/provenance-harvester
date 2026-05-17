@@ -50,6 +50,7 @@ from harvester.extractor.extractor_types import ExtractorDeps
 from harvester.extractor.git_runner import GitRunner
 from harvester.extractor.repo_cloner import RepoCloner
 from harvester.extractor.tag_walker import TagWalker
+from harvester.manifest_checkout import checkout_manifest_files
 from harvester.repo_package_matcher import (
     MatchResult,
     PackageMatch,
@@ -181,7 +182,10 @@ async def harvest_one_repo(
 
         try:
             async with cloner.clone_to_temp(work_item.repo_url) as clone_path:
-                match_result = match_packages_in_repo(clone_path, work_item.components)
+                async with checkout_manifest_files(clone_path) as manifest_tree:
+                    match_result = match_packages_in_repo(
+                        manifest_tree, work_item.components
+                    )
                 packages = await _walk_matched_or_fallback(
                     walker, clone_path, match_result, work_item
                 )
