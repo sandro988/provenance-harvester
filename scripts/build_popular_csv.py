@@ -30,7 +30,10 @@ import time
 from collections import Counter
 from pathlib import Path
 
+import httpx
+
 from harvester.ecosystems_client import EcosystemsClient
+from harvester.registry_sources import top_packages as native_top_packages
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FOOTPRINT_CSV = REPO_ROOT / "output" / "footprint.csv"
@@ -105,10 +108,30 @@ def split_qualified_name(ecosystem: str, qualified: str) -> tuple[str, str]:
     return namespace, name
 
 
-def fetch_ecosystem_top(
+# Ecosystems with a direct registry-API source. The rest fall back to
+# ecosyste.ms — necessary today for maven/golang/composer/cocoapods/pub/
+# hex/conan/luarocks/pear which don't expose clean top-by-downloads.
+NATIVE_ECOSYSTEMS = frozenset({"npm", "pypi", "cargo", "gem", "nuget"})
+
+
+def fetch_ecosystem_top_native(
+    http_client: httpx.Client, ecosystem: str, cap: int
+) -> tuple[list[Coord], int]:
+    """Use a per-registry direct API for an ecosystem we have a native source for."""
+    coords: list[Coord] = []
+    skipped_no_version = 0
+    for namespace, name, version, repo_url in native_top_packages(http_client, ecosystem, cap):
+        if not version:
+            skipped_no_version += 1
+            continue
+        coords.append((ecosystem, namespace, name, version, repo_url or ""))
+    return coords, skipped_no_version
+
+
+def fetch_ecosystem_top_ecosystems(
     client: EcosystemsClient, ecosystem: str, cap: int
 ) -> tuple[list[Coord], int]:
-    """Return top-N coords for an ecosystem and count of rows skipped (no version)."""
+    """Fall back to ecosyste.ms for ecosystems without a native source."""
     coords: list[Coord] = []
     skipped_no_version = 0
     for qualified, latest_version, _downloads, repo_url in client.top_packages(ecosystem, cap):
@@ -128,10 +151,18 @@ def main() -> int:
     all_coords: set[Coord] = set()
     per_ecosystem_stats: list[tuple[str, int, int, int, float]] = []
 
-    with EcosystemsClient() as client:
+    with (
+        EcosystemsClient() as ecosystems_client,
+        httpx.Client(timeout=30.0) as http_client,
+    ):
         for ecosystem, cap in ECOSYSTEM_CAPS:
             started = time.perf_counter()
-            coords, skipped = fetch_ecosystem_top(client, ecosystem, cap)
+            if ecosystem in NATIVE_ECOSYSTEMS:
+                coords, skipped = fetch_ecosystem_top_native(http_client, ecosystem, cap)
+                source = "native"
+            else:
+                coords, skipped = fetch_ecosystem_top_ecosystems(ecosystems_client, ecosystem, cap)
+                source = "ecosyste.ms"
             elapsed = time.perf_counter() - started
 
             before_count = len(all_coords)
@@ -143,8 +174,9 @@ def main() -> int:
 
             per_ecosystem_stats.append((ecosystem, len(coords), skipped, added, elapsed))
             print(
-                f"  {ecosystem:<11} fetched={len(coords):>6}  skipped_no_ver={skipped:>4}  "
-                f"new_after_exclude={added:>6}  ({elapsed:>5.1f}s)",
+                f"  {ecosystem:<11} ({source:<11}) fetched={len(coords):>6}  "
+                f"skipped_no_ver={skipped:>4}  new_after_exclude={added:>6}  "
+                f"({elapsed:>5.1f}s)",
                 flush=True,
             )
 
