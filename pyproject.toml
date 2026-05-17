@@ -41,3 +41,13 @@ indent-style = "space"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+# Ruff rule exclusions for vendored Phase 1b code.
+# These match exodos-backend's lint posture for the source files,
+# so vendored copies stay byte-identical to source.
+[tool.ruff.lint.per-file-ignores]
+"harvester/extractor/*" = [
+    "RUF002",  # Ambiguous unicode in docstrings (× and – are intentional)
+    "RUF003",  # Ambiguous unicode in comments (same)
+    "UP042",   # StrEnum vs (str, Enum) — preserve source style
+]
