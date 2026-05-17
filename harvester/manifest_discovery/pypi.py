@@ -64,6 +64,8 @@ class PypiManifestDetector:
     """Discovers PyPI packages via pyproject.toml / setup.cfg / setup.py."""
 
     ecosystem = "PYPI"
+    manifest_filenames = frozenset({'pyproject.toml', 'setup.cfg', 'setup.py'})
+    manifest_extensions = frozenset()
 
     def discover(self, repo_dir: Path) -> Iterator[DiscoveredPackage]:
         """Yield at most one record per directory containing a manifest.

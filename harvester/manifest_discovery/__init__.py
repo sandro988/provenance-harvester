@@ -59,6 +59,27 @@ DETECTORS: tuple[ManifestDetector, ...] = (
     RubyGemsManifestDetector(),
 )
 
+def all_manifest_filenames() -> frozenset[str]:
+    """Union of exact basenames every detector parses.
+
+    Lets downstream consumers (e.g. the harvester's manifest checkout
+    that materialises files out of a bare clone) ask "which file
+    names should I extract" without re-declaring the detectors'
+    filename whitelist. Adding a new ecosystem updates this set
+    automatically via its detector class attribute.
+    """
+    return frozenset().union(*(d.manifest_filenames for d in DETECTORS))
+
+
+def all_manifest_extensions() -> frozenset[str]:
+    """Union of filename suffixes every detector parses.
+
+    Same intent as :func:`all_manifest_filenames` — single source of
+    truth across the registry.
+    """
+    return frozenset().union(*(d.manifest_extensions for d in DETECTORS))
+
+
 __all__ = [
     "DETECTORS",
     "CargoManifestDetector",
@@ -70,5 +91,7 @@ __all__ = [
     "NuGetManifestDetector",
     "PypiManifestDetector",
     "RubyGemsManifestDetector",
+    "all_manifest_extensions",
+    "all_manifest_filenames",
     "should_skip_directory",
 ]

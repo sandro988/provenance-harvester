@@ -52,6 +52,8 @@ class RubyGemsManifestDetector:
     """Discovers Ruby gems by walking for ``*.gemspec`` files."""
 
     ecosystem = "RUBYGEMS"
+    manifest_filenames = frozenset()
+    manifest_extensions = frozenset({'.gemspec'})
 
     def discover(self, repo_dir: Path) -> Iterator[DiscoveredPackage]:
         """Yield one record per ``*.gemspec`` with a literal name assignment."""

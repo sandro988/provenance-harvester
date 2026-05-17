@@ -23,6 +23,18 @@ Both sides are reduced to a single ``(detector_ecosystem, key)`` tuple
 and matched on that key. Unmatched targets are returned alongside the
 matches so the orchestrator can log them without an extra detection
 pass.
+
+**Drift warning vs. the main project.** The exodos-backend
+``catalog_identity.normalize_name_for_key`` helper lower-cases NPM
+package names; this module preserves case (npm registry rejects
+uppercase publishes in practice, so the join is normally lossless,
+but a manifest that retained mixed-case authors-side could land in
+the warehouse under a different key than catalog_identity would
+generate). When the downstream loader (Phase 3a) wires the two
+emission paths together, reconcile by either lowercasing NPM keys
+here or relaxing the catalog_identity comparison; either side can
+move, but they must agree on a single canonical form before joins
+land in production.
 """
 
 from __future__ import annotations
@@ -132,35 +144,55 @@ def match_packages_in_repo(
 ) -> MatchResult:
     """Match every target to a directory inside ``repo_dir``, when possible.
 
-    The function runs every detector exactly once and builds a
-    ``{(detector_ecosystem, normalised_name): relative_path}`` index.
-    Each target is then looked up in that index. When two manifests
-    in the same ecosystem report the same normalised name (rare; the
-    detectors largely prevent it within a directory), the index keeps
-    the lexicographically-smallest path so monorepos with a sub-published
-    re-export pick the canonical root.
+    Runs only the detectors whose ecosystem appears in ``targets`` —
+    a repo with only npm targets never walks for ``pom.xml`` /
+    ``Cargo.toml`` / ``go.mod``. Builds a
+    ``{(detector_ecosystem, normalised_name): relative_path}`` index
+    from the discovered manifests, then looks each target up. When
+    two manifests in the same ecosystem report the same normalised
+    name (rare; the detectors largely prevent it within a directory),
+    the index keeps the lexicographically-smallest path so monorepos
+    with a sub-published re-export pick the canonical root.
+
+    Pre-computes targets' lookup keys to enable an early-exit when
+    every target has been matched — sparse-target sprawling monorepos
+    stop walking irrelevant subtrees.
 
     Returns a ``MatchResult`` — never raises on unmatched targets.
     """
-    index: dict[tuple[str, str], str] = {}
-    for detector in DETECTORS:
-        for discovered in detector.discover(repo_dir):
-            key = (detector.ecosystem, _discovered_key(detector.ecosystem, discovered))
-            existing = index.get(key)
-            if existing is None or discovered.relative_path < existing:
-                index[key] = discovered.relative_path
-
-    matched: list[PackageMatch] = []
+    # Resolve each target to its lookup key up-front. Targets whose
+    # ecosystem has no detector (apk/deb/composer/...) go straight to
+    # unmatched so we know not to spend any discovery cost on them.
+    lookups: dict[ComponentVersion, tuple[str, str]] = {}
     unmatched: list[ComponentVersion] = []
     for target in targets:
         detector_ecosystem = CSV_TO_DETECTOR_ECOSYSTEM.get(target.ecosystem)
         csv_key = _csv_key(target.ecosystem, target.namespace, target.name)
         if detector_ecosystem is None or csv_key is None:
-            # Ecosystem outside the detector roster — record as unmatched
-            # so the orchestrator can fall back without crashing.
             unmatched.append(target)
             continue
-        path = index.get((detector_ecosystem, csv_key))
+        lookups[target] = (detector_ecosystem, csv_key)
+
+    needed_ecosystems = {key[0] for key in lookups.values()}
+    pending_lookups = set(lookups.values())
+    index: dict[tuple[str, str], str] = {}
+    for detector in DETECTORS:
+        if detector.ecosystem not in needed_ecosystems:
+            continue
+        for discovered in detector.discover(repo_dir):
+            key = (detector.ecosystem, _discovered_key(detector.ecosystem, discovered))
+            existing = index.get(key)
+            if existing is None or discovered.relative_path < existing:
+                index[key] = discovered.relative_path
+            pending_lookups.discard(key)
+        if not pending_lookups:
+            # Every target's key is now in the index — no further
+            # detection can change the result. Stop walking.
+            break
+
+    matched: list[PackageMatch] = []
+    for target, key in lookups.items():
+        path = index.get(key)
         if path is None:
             unmatched.append(target)
             continue

@@ -40,6 +40,8 @@ class NpmManifestDetector:
     """Discovers npm packages by walking for ``package.json`` files."""
 
     ecosystem = "NPM"
+    manifest_filenames = frozenset({'package.json'})
+    manifest_extensions = frozenset()
 
     def discover(self, repo_dir: Path) -> Iterator[DiscoveredPackage]:
         """Yield one record per ``package.json`` with a ``name`` field.

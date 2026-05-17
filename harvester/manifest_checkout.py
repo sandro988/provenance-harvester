@@ -29,30 +29,13 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from harvester.manifest_discovery import (
+    all_manifest_extensions,
+    all_manifest_filenames,
+)
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
-
-# Exact basenames the manifest detectors parse.
-_EXACT_MANIFEST_NAMES: frozenset[str] = frozenset(
-    {
-        "package.json",
-        "pyproject.toml",
-        "setup.py",
-        "setup.cfg",
-        "pom.xml",
-        "Cargo.toml",
-        "go.mod",
-    }
-)
-
-# Files matched by extension (nuget projects, gemspecs).
-_MANIFEST_EXTENSIONS: tuple[str, ...] = (
-    ".nuspec",
-    ".csproj",
-    ".vbproj",
-    ".fsproj",
-    ".gemspec",
-)
 
 # Cap on how many paths we hand to a single ``git archive`` invocation.
 # ARG_MAX on macOS is ~256 KB; even with path lengths averaging 80 chars
@@ -63,11 +46,17 @@ _PATHS_PER_ARCHIVE_CALL = 1000
 
 
 def is_manifest_path(relative_path: str) -> bool:
-    """Return ``True`` if ``relative_path`` is a manifest our detectors parse."""
+    """Return ``True`` if ``relative_path`` is a manifest our detectors parse.
+
+    Reads the filename whitelist from the live detector registry so a
+    new ecosystem detector automatically broadens this filter without
+    a second list to update.
+    """
     name = posixpath.basename(relative_path)
-    if name in _EXACT_MANIFEST_NAMES:
+    if name in all_manifest_filenames():
         return True
-    return any(name.endswith(ext) for ext in _MANIFEST_EXTENSIONS)
+    extensions = all_manifest_extensions()
+    return any(name.endswith(ext) for ext in extensions)
 
 
 @contextlib.asynccontextmanager
@@ -155,9 +144,7 @@ async def _archive_into(bare_repo: Path, paths: tuple[str, ...] | list[str], des
         _, tar_err = await extract_proc.communicate()
         if extract_proc.returncode != 0:
             raise RuntimeError(
-                f"tar exited {extract_proc.returncode}: "
-                f"{tar_err.decode('utf-8', 'replace')}"
+                f"tar exited {extract_proc.returncode}: {tar_err.decode('utf-8', 'replace')}"
             )
     finally:
         tar_path.unlink(missing_ok=True)
-

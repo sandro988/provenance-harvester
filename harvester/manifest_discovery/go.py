@@ -47,6 +47,8 @@ class GoManifestDetector:
     """Discovers Go modules by walking for ``go.mod`` files."""
 
     ecosystem = "GO"
+    manifest_filenames = frozenset({'go.mod'})
+    manifest_extensions = frozenset()
 
     def discover(self, repo_dir: Path) -> Iterator[DiscoveredPackage]:
         """Yield one record per ``go.mod`` with a parseable ``module``."""

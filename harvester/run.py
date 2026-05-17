@@ -185,6 +185,15 @@ async def harvest_one_repo(
                     walker, clone_path, match_result, work_item
                 )
         except Exception as exc:
+            # Failure attribution is the operator's first triage question.
+            # Without exc_info=True the structured event records only the
+            # exception class name; the stack trace is lost.
+            logger.warning(
+                "run.clone_or_walk_failed",
+                repo_url=work_item.repo_url,
+                error=type(exc).__name__,
+                exc_info=True,
+            )
             return {
                 "repo_url": work_item.repo_url,
                 "status": "clone_or_walk_failed",
@@ -208,6 +217,12 @@ async def harvest_one_repo(
                 packages=packages,
             )
         except Exception as exc:
+            logger.warning(
+                "run.write_failed",
+                repo_url=work_item.repo_url,
+                error=type(exc).__name__,
+                exc_info=True,
+            )
             return {
                 "repo_url": work_item.repo_url,
                 "status": "write_failed",
@@ -241,6 +256,13 @@ async def _walk_matched_or_fallback(
     repo, but every contributor still lands in the warehouse under the
     exemplar target's coordinates so downstream queries don't see a
     silent hole.
+
+    Per-package walks run concurrently via :func:`asyncio.gather` —
+    they read the same on-disk bare clone and share no mutable state,
+    so the two ``git`` invocations per walk overlap rather than
+    serializing. Wall-time savings scale with package count per repo;
+    a 4-package monorepo overlaps four walks into ~one walk's elapsed
+    time.
     """
     if not match_result.matched:
         walks = await walker.walk(clone_path)
@@ -255,13 +277,17 @@ async def _walk_matched_or_fallback(
             )
         ]
 
-    packages: list[PackageHarvest] = []
-    for match in match_result.matched:
-        walks = await walker.walk(clone_path, path_filter=match.relative_path)
-        if not walks:
-            continue
-        packages.append(_package_harvest_from_match(match, walks))
-    return packages
+    walks_per_match = await asyncio.gather(
+        *(
+            walker.walk(clone_path, path_filter=match.relative_path)
+            for match in match_result.matched
+        )
+    )
+    return [
+        _package_harvest_from_match(match, walks)
+        for match, walks in zip(match_result.matched, walks_per_match, strict=True)
+        if walks
+    ]
 
 
 def _package_harvest_from_match(

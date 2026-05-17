@@ -84,3 +84,14 @@ def should_skip_directory(name: str) -> bool:
     real package definitions.
     """
     return name in SKIP_DIRECTORIES or name.startswith(".")
+
+
+def xml_local_name(tag: str) -> str:
+    """Return the local part of an XML tag, stripping its namespace.
+
+    ``ElementTree.parse`` keeps the namespace fused to the tag name
+    (``{http://maven.apache.org/POM/4.0.0}project``). Maven and NuGet
+    both need to compare against the local name only; this helper is
+    the one place that strips them.
+    """
+    return tag.split("}", 1)[-1] if "}" in tag else tag

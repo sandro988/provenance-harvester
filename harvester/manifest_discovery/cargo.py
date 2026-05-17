@@ -34,6 +34,8 @@ class CargoManifestDetector:
     """Discovers Cargo packages by walking for ``Cargo.toml`` files."""
 
     ecosystem = "CARGO"
+    manifest_filenames = frozenset({'Cargo.toml'})
+    manifest_extensions = frozenset()
 
     def discover(self, repo_dir: Path) -> Iterator[DiscoveredPackage]:
         """Yield one record per ``Cargo.toml`` with a ``[package].name``.

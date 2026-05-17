@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 from harvester.manifest_discovery._logger import logger
 from harvester.manifest_discovery.base import (
     should_skip_directory,
+    xml_local_name,
 )
 from harvester.manifest_discovery.discovery_types import (
     DiscoveredPackage,
@@ -37,18 +38,12 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-# Maven 4 POMs declare a default namespace; ElementTree's tag
-# matching treats namespaced and non-namespaced elements as
-# different. The helper below strips namespaces uniformly so the
-# lookup code can use plain element names.
-def _local_name(tag: str) -> str:
-    return tag.split("}", 1)[-1] if "}" in tag else tag
-
-
 class MavenManifestDetector:
     """Discovers Maven artifacts by walking for ``pom.xml`` files."""
 
     ecosystem = "MAVEN"
+    manifest_filenames = frozenset({'pom.xml'})
+    manifest_extensions = frozenset()
 
     def discover(self, repo_dir: Path) -> Iterator[DiscoveredPackage]:
         """Yield one record per parseable ``pom.xml``."""
@@ -98,7 +93,7 @@ class MavenManifestDetector:
             )
             return None
         root = tree.getroot()
-        if _local_name(root.tag) != "project":
+        if xml_local_name(root.tag) != "project":
             return None
 
         group_id = _find_text(root, "groupId")
@@ -115,7 +110,7 @@ class MavenManifestDetector:
 def _find_child(element: ElementTree.Element, name: str) -> ElementTree.Element | None:
     """Direct-child lookup by local name, namespace-agnostic."""
     for child in element:
-        if _local_name(child.tag) == name:
+        if xml_local_name(child.tag) == name:
             return child
     return None
 

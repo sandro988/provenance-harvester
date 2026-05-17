@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING
 from harvester.manifest_discovery._logger import logger
 from harvester.manifest_discovery.base import (
     should_skip_directory,
+    xml_local_name,
 )
 from harvester.manifest_discovery.discovery_types import (
     DiscoveredPackage,
@@ -41,14 +42,12 @@ if TYPE_CHECKING:
 _PROJECT_EXTENSIONS: frozenset[str] = frozenset({".csproj", ".vbproj", ".fsproj"})
 
 
-def _local_name(tag: str) -> str:
-    return tag.split("}", 1)[-1] if "}" in tag else tag
-
-
 class NuGetManifestDetector:
     """Discovers NuGet packages from .nuspec and SDK-style project files."""
 
     ecosystem = "NUGET"
+    manifest_filenames = frozenset()
+    manifest_extensions = frozenset({'.nuspec', '.csproj', '.vbproj', '.fsproj'})
 
     def discover(self, repo_dir: Path) -> Iterator[DiscoveredPackage]:
         """Yield one record per directory with a parseable NuGet manifest.
@@ -123,13 +122,13 @@ class NuGetManifestDetector:
     @staticmethod
     def _read_nuspec_id(root: ElementTree.Element) -> str | None:
         """Extract ``<metadata><id>`` from a nuspec root."""
-        if _local_name(root.tag) != "package":
+        if xml_local_name(root.tag) != "package":
             return None
         for child in root:
-            if _local_name(child.tag) != "metadata":
+            if xml_local_name(child.tag) != "metadata":
                 continue
             for meta_child in child:
-                if _local_name(meta_child.tag) == "id" and meta_child.text:
+                if xml_local_name(meta_child.tag) == "id" and meta_child.text:
                     name = meta_child.text.strip()
                     if name:
                         return name
@@ -149,10 +148,10 @@ class NuGetManifestDetector:
         package_id: str | None = None
         assembly_name: str | None = None
         for property_group in root.iter():
-            if _local_name(property_group.tag) != "PropertyGroup":
+            if xml_local_name(property_group.tag) != "PropertyGroup":
                 continue
             for prop in property_group:
-                local = _local_name(prop.tag)
+                local = xml_local_name(prop.tag)
                 if local == "PackageId" and prop.text:
                     package_id = prop.text.strip() or None
                 elif local == "AssemblyName" and prop.text:
