@@ -51,7 +51,17 @@ def is_manifest_path(relative_path: str) -> bool:
     Reads the filename whitelist from the live detector registry so a
     new ecosystem detector automatically broadens this filter without
     a second list to update.
+
+    Rejects any path whose segments begin with ``-``. Such paths would
+    otherwise be option-flag-smuggled into downstream ``git``
+    invocations (``git archive --output=...`` etc.) — even though the
+    callers thread paths after a ``--`` end-of-options marker, the
+    belt-and-braces filter here guarantees no future caller can
+    accidentally undo that protection. Real-world manifests never live
+    under a dash-prefixed directory.
     """
+    if any(segment.startswith("-") for segment in relative_path.split("/")):
+        return False
     name = posixpath.basename(relative_path)
     if name in all_manifest_filenames():
         return True
@@ -115,6 +125,13 @@ async def _archive_into(bare_repo: Path, paths: tuple[str, ...] | list[str], des
     with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as fh:
         tar_path = Path(fh.name)
     try:
+        # ``--`` after ``HEAD`` is the non-negotiable end-of-options
+        # marker. A tracked path beginning with ``--`` would otherwise
+        # be parsed by git as a flag: ``--output=...`` overrides the
+        # harness tar destination (arbitrary file write), ``--remote=...``
+        # would pull from an arbitrary remote. ``is_manifest_path`` also
+        # rejects dash-prefixed segments, so a regression in either
+        # layer alone cannot reopen the hole.
         archive_proc = await asyncio.create_subprocess_exec(
             "git",
             "-C",
@@ -123,6 +140,7 @@ async def _archive_into(bare_repo: Path, paths: tuple[str, ...] | list[str], des
             "--format=tar",
             f"--output={tar_path}",
             "HEAD",
+            "--",
             *paths,
             stderr=asyncio.subprocess.PIPE,
         )

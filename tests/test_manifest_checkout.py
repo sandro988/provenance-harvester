@@ -52,6 +52,15 @@ if TYPE_CHECKING:
         ("Cargo.lock", False),  # lock files are not manifests
         ("package-lock.json", False),
         ("go.sum", False),
+        # Dash-prefixed segments are rejected wholesale to prevent
+        # option-flag smuggling into ``git archive`` (a tracked path
+        # like ``--output=/victim/package.json`` would otherwise pass
+        # the basename check and let git's argument parser override the
+        # archive destination).
+        ("--output=/etc/passwd/package.json", False),
+        ("--remote=evil.example.com/package.json", False),
+        ("legit/--output=foo/package.json", False),
+        ("-rf/package.json", False),
     ],
 )
 def test_is_manifest_path(path: str, expected: bool) -> None:
@@ -187,3 +196,43 @@ def test_materialize_recognises_extension_based_manifests(
         "specs/cool_gem.gemspec",
         "src/Pkg.nuspec",
     }
+
+
+def test_materialize_refuses_to_extract_dash_prefixed_paths(
+    bare_repo_factory: Callable[[dict[str, str]], Path],
+    tmp_path: Path,
+) -> None:
+    """Regression: a tracked file whose path begins with ``--`` (e.g.
+    ``--output=<victim>/package.json``) must not be passed to
+    ``git archive`` as an argv — otherwise git would option-parse it,
+    redirecting the tar destination to the attacker-chosen victim file.
+
+    Two layers of defence are exercised here:
+      1. ``is_manifest_path`` rejects dash-prefixed segments outright,
+         so the path is never added to the archive argv.
+      2. The ``--`` end-of-options marker on the ``git archive`` call
+         would block flag parsing even if a path slipped through.
+
+    The test attacks layer 1 by including a file whose name would smuggle
+    a ``git archive --output=<victim>`` flag if let through, and asserts
+    the victim file is never created.
+    """
+    victim = tmp_path / "victim.tar"
+    # The path's basename ends with ``package.json`` (basename-only filter
+    # would have accepted it); the first segment is a smuggled flag.
+    attack_path = f"--output={victim}/package.json"
+    bare = bare_repo_factory(
+        {
+            attack_path: '{"name": "evil"}',
+            "legit/package.json": '{"name": "legit"}',
+        }
+    )
+
+    rel_paths, _ = asyncio.run(_materialize(bare))
+
+    # The attack path must not appear in the materialised output.
+    assert attack_path not in rel_paths
+    assert "legit/package.json" in rel_paths
+    # And — most importantly — the victim file must not have been
+    # created on disk by a redirected ``git archive`` output.
+    assert not victim.exists()
