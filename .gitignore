@@ -34,7 +34,8 @@ htmlcov/
 Thumbs.db
 
 # Project-specific
-/output/
+/output/*
+!/output/footprint.csv
 /state/
 /tmp/
 benchmark_output/
