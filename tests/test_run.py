@@ -24,6 +24,7 @@ from harvester.run import (
     RepoWorkItem,
     _canonical_name,
     _walk_matched_or_fallback,
+    load_work_for_single_repo,
 )
 
 if TYPE_CHECKING:
@@ -187,3 +188,74 @@ async def test_fallback_uses_exemplar_namespace_in_name(tmp_path: Path) -> None:
 )
 def test_canonical_name(namespace: str, name: str, expected: str) -> None:
     assert _canonical_name(namespace, name) == expected
+
+
+# --- load_work_for_single_repo ------------------------------------------------
+
+_HEADER = "ecosystem,namespace,name,version,repo_url,resolution_source\n"
+
+
+def _write_csv(tmp_path: Path, body: str) -> Path:
+    path = tmp_path / "footprint_resolved.csv"
+    path.write_text(_HEADER + body)
+    return path
+
+
+def test_single_repo_filters_csv_to_one_url(tmp_path: Path) -> None:
+    """All matching rows collapse into one work item; others are filtered out."""
+    csv_body = (
+        "npm,,react,19.1.0,https://github.com/facebook/react,deps_dev\n"
+        "npm,,react-dom,19.1.0,https://github.com/facebook/react,deps_dev\n"
+        "npm,,vue,3.5.0,https://github.com/vuejs/core,deps_dev\n"
+    )
+    csv_path = _write_csv(tmp_path, csv_body)
+
+    work = load_work_for_single_repo(csv_path, "https://github.com/facebook/react")
+
+    assert len(work) == 1
+    assert work[0].repo_url == "https://github.com/facebook/react"
+    assert len(work[0].components) == 2
+    assert {comp.name for comp in work[0].components} == {"react", "react-dom"}
+
+
+def test_single_repo_url_not_in_csv_returns_empty(tmp_path: Path) -> None:
+    """Missing URL is not a crash — caller will print 'nothing to do' and exit."""
+    csv_body = "npm,,react,19.1.0,https://github.com/facebook/react,deps_dev\n"
+    csv_path = _write_csv(tmp_path, csv_body)
+
+    work = load_work_for_single_repo(csv_path, "https://github.com/never/heard-of-it")
+
+    assert work == []
+
+
+def test_single_repo_rows_with_blank_repo_url_are_skipped(tmp_path: Path) -> None:
+    """A blank ``repo_url`` row is dropped regardless of how it matches by name."""
+    csv_body = (
+        "npm,,react,19.1.0,,deps_dev\n"
+        "npm,,react,19.1.0,https://github.com/facebook/react,deps_dev\n"
+    )
+    csv_path = _write_csv(tmp_path, csv_body)
+
+    work = load_work_for_single_repo(csv_path, "https://github.com/facebook/react")
+
+    assert len(work) == 1
+    assert len(work[0].components) == 1
+
+
+def test_single_repo_empty_url_argument_raises(tmp_path: Path) -> None:
+    """An empty ``--single-repo`` argument is a programming error, not a no-op."""
+    csv_path = _write_csv(tmp_path, "")
+
+    with pytest.raises(ValueError, match="empty"):
+        load_work_for_single_repo(csv_path, "   ")
+
+
+def test_single_repo_whitespace_is_trimmed(tmp_path: Path) -> None:
+    """Leading/trailing whitespace on the URL argument matches trimmed CSV rows."""
+    csv_body = "npm,,react,19.1.0,https://github.com/facebook/react,deps_dev\n"
+    csv_path = _write_csv(tmp_path, csv_body)
+
+    work = load_work_for_single_repo(csv_path, "  https://github.com/facebook/react  ")
+
+    assert len(work) == 1
+    assert work[0].repo_url == "https://github.com/facebook/react"

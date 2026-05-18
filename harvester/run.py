@@ -9,12 +9,22 @@ unique repo:
 3. Writes the four CSVs (components, versions, contributors, persons)
    into a per-repo subdirectory of ``--output-dir``.
 
-The script aims to be the unit AWS spot workers run. Each worker picks
-its ``--shard`` and ``--total-shards`` from instance metadata, runs to
-completion, and the per-repo output trees get rsynced to S3 by a
-collection sidecar.
+The script aims to be the unit AWS spot workers run. There are two
+invocation modes:
 
-Two correctness properties:
+- **Sharded fleet mode** (``--shard N --total-shards K``): each worker
+  picks its slice from instance metadata, processes every repo whose
+  ``sha256(repo_url) mod K == N``, runs to completion.
+
+- **Single-repo mode** (``--single-repo URL``): used by per-message SQS
+  workers. The CSV is still consulted for the target component list
+  (filtered to rows whose ``repo_url`` matches the argument), but no
+  sharding happens — exactly one repo is harvested and the process
+  exits. The message-driven design lets SQS handle retries, DLQ, and
+  visibility timeouts at the AWS layer rather than reimplementing them
+  here.
+
+Two correctness properties (sharded mode):
 
 - **Repo-level dedup.** A repo serving many packages (e.g.
   ``dart-lang/sdk`` for many ``pub/*`` versions) is cloned exactly once
@@ -145,6 +155,67 @@ def load_work(input_csv: Path, shard: int, total_shards: int) -> list[RepoWorkIt
         component_versions_in_shard=sum(len(c.components) for c in work),
         skipped_no_repo_url=skipped_no_url,
         skipped_other_shard=skipped_other_shard,
+    )
+    return work
+
+
+def load_work_for_single_repo(
+    input_csv: Path,
+    target_repo_url: str,
+) -> list[RepoWorkItem]:
+    """Read the CSV, return only the work item for a single matching repo.
+
+    Used by per-message AWS workers: SQS hands the worker one URL, the
+    worker filters the same input CSV used by the sharded path down to
+    rows for that URL, and harvests it exactly the same way the sharded
+    fleet would have. Sharding is bypassed entirely — the SQS layer is
+    responsible for handing each URL to exactly one worker.
+
+    Returns an empty list when no rows match. The caller logs and exits
+    cleanly so a stale or already-removed URL doesn't crash a worker;
+    SQS will eventually DLQ a repo that produces nothing across retries.
+    """
+    target = target_repo_url.strip()
+    if not target:
+        raise ValueError("--single-repo URL is empty")
+
+    matched: list[ComponentVersion] = []
+    skipped_no_url = 0
+    skipped_other_repo = 0
+
+    with input_csv.open(newline="") as fh:
+        for row in csv.DictReader(fh):
+            repo_url = row.get("repo_url", "").strip()
+            if not repo_url:
+                skipped_no_url += 1
+                continue
+            if repo_url != target:
+                skipped_other_repo += 1
+                continue
+            matched.append(
+                ComponentVersion(
+                    ecosystem=row["ecosystem"],
+                    namespace=row["namespace"],
+                    name=row["name"],
+                    version=row["version"],
+                    repo_url=repo_url,
+                )
+            )
+
+    if not matched:
+        logger.warning(
+            "run.single_repo_no_components",
+            repo_url=target,
+            skipped_no_repo_url=skipped_no_url,
+            skipped_other_repo=skipped_other_repo,
+        )
+        return []
+
+    work = [RepoWorkItem(repo_url=target, components=tuple(matched))]
+    logger.info(
+        "run.single_repo_loaded",
+        repo_url=target,
+        component_versions=len(matched),
     )
     return work
 
@@ -343,13 +414,24 @@ async def main() -> int:
         "--shard",
         type=int,
         default=0,
-        help="This shard's index (0-based).",
+        help="This shard's index (0-based). Ignored when --single-repo is set.",
     )
     parser.add_argument(
         "--total-shards",
         type=int,
         default=1,
-        help="Total number of shards in the fleet.",
+        help="Total number of shards in the fleet. Ignored when --single-repo is set.",
+    )
+    parser.add_argument(
+        "--single-repo",
+        type=str,
+        default=None,
+        help=(
+            "Harvest exactly one repo URL instead of a shard slice. "
+            "The input CSV is still consulted for the target component list "
+            "(filtered to rows whose repo_url matches). Designed for "
+            "per-message AWS workers driven by SQS."
+        ),
     )
     parser.add_argument(
         "--output-dir",
@@ -365,9 +447,15 @@ async def main() -> int:
     )
     args = parser.parse_args()
 
-    work = load_work(args.input, args.shard, args.total_shards)
+    if args.single_repo:
+        work = load_work_for_single_repo(args.input, args.single_repo)
+        mode_label = f"single-repo {args.single_repo}"
+    else:
+        work = load_work(args.input, args.shard, args.total_shards)
+        mode_label = f"shard {args.shard}/{args.total_shards}"
+
     if not work:
-        print(f"[run] shard {args.shard}/{args.total_shards}: nothing to do")
+        print(f"[run] {mode_label}: nothing to do")
         return 0
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -384,10 +472,7 @@ async def main() -> int:
     shutdown_event = asyncio.Event()
     install_signal_handlers(shutdown_event)
 
-    print(
-        f"[run] shard {args.shard}/{args.total_shards}: "
-        f"{len(work)} repos to harvest at concurrency={args.concurrency}"
-    )
+    print(f"[run] {mode_label}: {len(work)} repos to harvest at concurrency={args.concurrency}")
 
     started = time.perf_counter()
     results = await asyncio.gather(
