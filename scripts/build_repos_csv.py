@@ -42,32 +42,10 @@ MAX_BYTES_BILLED = 20 * 1024**3  # 20 GiB
 DEPS_DEV_DATASET = "bigquery-public-data.deps_dev_v1"
 SCORECARD_TABLE = "openssf.scorecardcron.scorecard-v2"
 
-# Standard OpenSSF Scorecard checks. Repos without a scorecard get blank
-# cells for every column; repos with a scorecard but missing a specific
-# check (e.g. private-repo features) also get blanks for that check.
-# Kept explicit so the CSV schema stays stable when the dataset adds
-# experimental checks the downstream loader doesn't expect.
-SCORECARD_CHECKS: tuple[str, ...] = (
-    "Binary-Artifacts",
-    "Branch-Protection",
-    "CI-Tests",
-    "CII-Best-Practices",
-    "Code-Review",
-    "Contributors",
-    "Dangerous-Workflow",
-    "Dependency-Update-Tool",
-    "Fuzzing",
-    "License",
-    "Maintained",
-    "Packaging",
-    "Pinned-Dependencies",
-    "SAST",
-    "Security-Policy",
-    "Signed-Releases",
-    "Token-Permissions",
-    "Vulnerabilities",
-    "Webhooks",
-)
+# Only the OpenSSF Scorecard overall score is surfaced as a column.
+# Per-check scores live in the same dataset and can be re-derived
+# downstream if needed; expanding the schema by 19 columns just to
+# capture them eagerly bloats the file with rarely-used noise.
 
 
 def initialize_bq_client() -> bigquery.Client:
@@ -247,8 +225,7 @@ def fetch_scorecards(
     """
     scorecard_names = [f"github.com/{slug}" for slug in slugs]
     query = f"""
-        SELECT repo.name AS name, date, score,
-               ARRAY(SELECT AS STRUCT name AS check_name, score AS check_score FROM UNNEST(checks)) AS checks
+        SELECT repo.name AS name, date, score
         FROM `{SCORECARD_TABLE}`
         WHERE date = DATE("{scorecard_date}")
           AND repo.name IN UNNEST(@names)
@@ -276,11 +253,9 @@ def fetch_scorecards(
     out: dict[str, dict] = {}
     for r in rows:
         slug = r["name"].removeprefix("github.com/")
-        check_scores = {c["check_name"]: c["check_score"] for c in r["checks"]}
         out[slug] = {
             "scorecard_score": r["score"],
             "scorecard_date": r["date"].isoformat() if r["date"] else "",
-            "checks": check_scores,
         }
     return out
 
@@ -308,7 +283,6 @@ def write_csv(
         "deps_dev_snapshot_at",
         "scorecard_score",
         "scorecard_date",
-        *(f"scorecard_{check.lower().replace('-', '_')}" for check in SCORECARD_CHECKS),
     ]
     with_deps_dev = 0
     with_scorecard = 0
@@ -322,7 +296,6 @@ def write_csv(
                 with_deps_dev += 1
             if sc:
                 with_scorecard += 1
-            check_scores = sc.get("checks", {})
             row = [
                 slug_to_url[slug],
                 dd.get("stars", ""),
@@ -333,7 +306,6 @@ def write_csv(
                 dd.get("snapshot_at", ""),
                 sc.get("scorecard_score", ""),
                 sc.get("scorecard_date", ""),
-                *(check_scores.get(check, "") for check in SCORECARD_CHECKS),
             ]
             writer.writerow(row)
     return len(slugs), with_deps_dev, with_scorecard
